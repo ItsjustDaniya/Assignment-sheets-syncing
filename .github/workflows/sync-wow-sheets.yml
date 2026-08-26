@@ -1,0 +1,47 @@
+name: Sync WOW Sheets
+
+on:
+  schedule:
+    # Runs every 4 hours. If this sync depends on Assignment_Pipeline_Automation.py
+    # having already updated the source sheet, either:
+    #   (a) offset this schedule to run a bit after that pipeline's schedule, or
+    #   (b) if both workflows live in the SAME repo, replace this `schedule:`
+    #       block with a `workflow_run:` trigger so this only fires right after
+    #       that pipeline finishes successfully:
+    #
+    # on:
+    #   workflow_run:
+    #     workflows: ["Assignment Pipeline"]   # <- must match that workflow's `name:` exactly
+    #     types: [completed]
+    #
+    - cron: "30 */4 * * *"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+concurrency:
+  group: sync-wow-sheets
+  cancel-in-progress: false
+
+jobs:
+  run-sync:
+    runs-on: ubuntu-latest
+    # If using the workflow_run trigger above, uncomment this so a failed
+    # upstream run doesn't waste time syncing stale/unfinished data:
+    # if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run' }}
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        run: python sync_sheets.py
