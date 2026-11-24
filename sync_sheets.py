@@ -15,7 +15,7 @@ from requests.exceptions import ConnectionError, Timeout
 SOURCE_SHEET_ID = '1-ZiZ5gyYKWK49GuFqqIDNobIr60Gek7DLsmfAhHbmTQ'
 DEST_SHEET_ID = '1knzRvmPqhvSudEJeXksQeXSZklAybIBfd_IMH7XLMK4'
 SOURCE_TAB_NAME = DEST_TAB_NAME = 'Student-Assign-WOW'
-CHUNK_ROWS = 1000
+CHUNK_ROWS = 10000
 CELL_LIMIT = 10_000_000
 MAX_BYTES = 1_500_000
 last_request = 0.0
@@ -38,16 +38,33 @@ def retry(fn):
             time.sleep(delay)
 
 
-def write_rows(ws, start, values, cols):
+def write_rows(book, ws, start, values, cols):
     if not values:
         return
     if len(values) > 1 and len(json.dumps(values, ensure_ascii=True).encode('utf-8')) > MAX_BYTES:
         mid = len(values) // 2
-        write_rows(ws, start, values[:mid], cols)
-        write_rows(ws, start + mid, values[mid:], cols)
+        write_rows(book, ws, start, values[:mid], cols)
+        write_rows(book, ws, start + mid, values[mid:], cols)
         return
     target = f'A{start}:{rowcol_to_a1(start + len(values) - 1, cols)}'
-    retry(lambda: ws.update(range_name=target, values=values, value_input_option='RAW'))
+    qualified = "'" + ws.title.replace("'", "''") + "'!" + target
+    result = retry(lambda: book.values_update(
+        qualified, params={'valueInputOption': 'RAW'},
+        body={'range': qualified, 'majorDimension': 'ROWS', 'values': values}))
+    if result.get('spreadsheetId') != book.id:
+        raise RuntimeError('Unexpected spreadsheet ID in write response')
+    if result.get('updatedRows') != len(values) or result.get('updatedCells') != len(values)*cols:
+        raise RuntimeError(f'Incomplete write at {target}: {result.get("updatedRows")} rows, {result.get("updatedCells")} cells')
+    # Verify the first and last populated row of this request directly from storage.
+    populated = [i for i, row in enumerate(values) if any(v not in ('', None) for v in row)]
+    for i in sorted(set(populated[:1] + populated[-1:])):
+        r = start + i
+        area = "'" + ws.title.replace("'", "''") + "'!" + f'A{r}:{rowcol_to_a1(r, cols)}'
+        got = retry(lambda: book.values_get(area, params={'valueRenderOption': 'UNFORMATTED_VALUE'})).get('values', [])
+        actual = list(got[0]) if got else []
+        actual += [''] * (cols-len(actual))
+        if actual != values[i]:
+            raise RuntimeError(f'Read-back mismatch at destination row {r}; sync stopped. Source unchanged.')
 
 
 def main():
@@ -63,6 +80,8 @@ def main():
     dst = retry(lambda: gc.open_by_key(DEST_SHEET_ID))
     sw = retry(lambda: src.worksheet(SOURCE_TAB_NAME))
     dw = retry(lambda: dst.worksheet(DEST_TAB_NAME))
+    print(f'Source: {src.id} / {sw.title} / gid={sw.id}', flush=True)
+    print(f'Destination: {dst.id} / {dw.title} / gid={dw.id}', flush=True)
     # Read before modifying destination; retain interior blank rows and columns.
     blocks = []
     rows = cols = 0
@@ -83,6 +102,8 @@ def main():
     drop_fields = {"Current company", "Current Job role", "Siddhi/ Mohit approval",
                    "Paridhi/KC", "Retention Remarks", "Reason for cancellation"}
     header = blocks[0][1][0] if blocks and blocks[0][1] else []
+    if not header or str(header[0]).strip() != 'course_id':
+        raise RuntimeError('Unexpected source header; destination unchanged.')
     keep = [i for i in range(cols) if i >= len(header) or str(header[i]).strip() not in drop_fields]
     print(f"Excluded {cols-len(keep)} source columns", flush=True)
     blocks = [(start, [[row[i] if i < len(row) else '' for i in keep] for row in values]) for start, values in blocks]
@@ -106,7 +127,7 @@ def main():
         for i in range(n):
             row = list(values[i][:cols]) if i < len(values) else []
             padded.append(row + ['']*(cols-len(row)))
-        write_rows(dw, start, padded, cols)
+        write_rows(dst, dw, start, padded, cols)
         print(f'Uploaded {start+n-1:,}/{rows:,} rows', flush=True)
     stale = []
     if new_rows > rows:
@@ -115,7 +136,11 @@ def main():
         stale.append(f'{rowcol_to_a1(1,cols+1)}:{rowcol_to_a1(rows,new_cols)}')
     if stale:
         retry(lambda: dw.batch_clear(stale))
-    print(f'Sync successful: {rows:,} rows including header, {cols} columns; {time.monotonic()-started:.1f}s', flush=True)
+    expected_header = blocks[0][1][0]
+    actual_header = retry(lambda: dw.row_values(1, value_render_option='UNFORMATTED_VALUE'))
+    if actual_header != expected_header:
+        raise RuntimeError('Final header verification failed')
+    print(f'Sync successful (sample read-back verified): {rows:,} rows including header, {cols} columns; {time.monotonic()-started:.1f}s', flush=True)
 
 
 if __name__ == '__main__':
