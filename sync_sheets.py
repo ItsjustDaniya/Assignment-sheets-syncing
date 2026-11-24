@@ -79,9 +79,19 @@ def main():
         print(f'Read source rows {start:,}-{end:,}', flush=True)
     if not rows or not cols:
         raise RuntimeError('Source is empty; destination left unchanged for safety.')
+    # Also exclude approved fields if source has not yet been refreshed.
+    drop_fields = {"Current company", "Current Job role", "Siddhi/ Mohit approval",
+                   "Paridhi/KC", "Retention Remarks", "Reason for cancellation"}
+    header = blocks[0][1][0] if blocks and blocks[0][1] else []
+    keep = [i for i in range(cols) if i >= len(header) or str(header[i]).strip() not in drop_fields]
+    print(f"Excluded {cols-len(keep)} source columns", flush=True)
+    blocks = [(start, [[row[i] if i < len(row) else '' for i in keep] for row in values]) for start, values in blocks]
+    cols = len(keep)
+    if not cols:
+        raise RuntimeError('No columns remain after filtering')
     old_rows, old_cols = dw.row_count, dw.col_count
     others = sum(w.row_count*w.col_count for w in retry(dst.worksheets) if w.id != dw.id)
-    new_rows, new_cols = max(rows, old_rows), max(cols, old_cols)
+    new_rows, new_cols = rows, cols
     projected = others + new_rows*new_cols
     print(f'Source: {rows:,} rows x {cols} columns; projected workbook: {projected:,} cells', flush=True)
     if projected > CELL_LIMIT:
